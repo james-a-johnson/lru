@@ -229,6 +229,10 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
         }
     }
 
+    /// Get a reference to a value based on the index of the backing array
+    ///
+    /// This method will check to ensure that the index is valid and will return None if there is
+    /// not a valid element at that address.
     pub fn get_arr_ref(&self, index: usize) -> Option<(&K, &V)> {
         if index >= self.size {
             None
@@ -240,11 +244,20 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
         }
     }
 
+    /// Same as [`ConstLinkedList::get_arr_ref`] but does not check to ensure that the index is
+    /// valid
+    ///
+    /// # Safety
+    /// Caller must assure that the index references a valid entry in the backing list.
     pub unsafe fn get_arr_ref_unchecked(&self, index: usize) -> (&K, &V) {
         let node = self.nodes[index].assume_init_ref();
         (&node.key, &node.value)
     }
 
+    /// Get a reference to the head element of the list
+    ///
+    /// # Safety
+    /// Caller must assure that there is at least one element that has been inserted into the list.
     pub unsafe fn get_head_ref_unchecked(&self) -> &V {
         unsafe { &self.nodes[self.head].assume_init_ref().value }
     }
@@ -344,6 +357,7 @@ impl<const N: usize, K, V> Drop for ConstLinkedList<N, K, V> {
     }
 }
 
+// This trait implementation is not really necessary. Having it just makes some testing easier
 impl<const N: usize, K, V> IntoIterator for ConstLinkedList<N, K, V>
 where
     K: Clone + Copy,

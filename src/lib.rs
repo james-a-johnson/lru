@@ -31,8 +31,9 @@
 #![warn(clippy::correctness)]
 #![warn(clippy::missing_docs)]
 
-use std::collections::HashMap;
 use std::hash::Hash;
+
+use bimap::hash::BiHashMap as BiMap;
 
 mod linked;
 use linked::ConstLinkedList;
@@ -45,23 +46,16 @@ use linked::ConstLinkedList;
 /// Type parameter P is the type of the parameter that the function takes.
 ///
 /// Type parameter V is the type of the return value of the function.
-///
-/// This struct currently has a problem that the map of parameters to indices in the backing cache
-/// can grow unbounded. To keep the property of a get having a constant time access when the
-/// parameter is in the cache, old removed values are left in the map and won't necessarily be
-/// removed when they are no longer in the cache. To remedy this, you can use the [`LRUCache::map_size`]
-/// method to determine the current size of the map and [`LRUCache::purge`] method to get rid of
-/// unused values if it's size is getting too large.
 pub struct LRUCache<const N: usize, P, V>
 where
     P: Hash + Eq,
 {
     /// Function that is being cached
     pub func: fn(P) -> V,
-    /// Map of parameters to their index in the cache
-    map: HashMap<P, usize>,
+    /// Bi directional map of parameters to their index in the linked list
+    map: BiMap<P, usize>,
     /// Cache of parameter value pairs
-    cache: Box<ConstLinkedList<N, P, V>>,
+    cache: Box<ConstLinkedList<N, V>>,
 }
 
 impl<const N: usize, P, V> LRUCache<N, P, V>
@@ -72,14 +66,9 @@ where
     pub fn new(f: fn(P) -> V) -> Self {
         Self {
             func: f,
-            map: HashMap::with_capacity(N),
+            map: BiMap::with_capacity(N),
             cache: Box::new(ConstLinkedList::new()),
         }
-    }
-
-    /// Get the number of entries in the backing map of the cache
-    pub fn map_size(&self) -> usize {
-        self.map.len()
     }
 
     /// Get a reference to the returned value of the function
@@ -90,34 +79,18 @@ where
     ///
     /// The parameter value pair will become the new most recently used value in the cache.
     pub fn get_ref(&mut self, p: P) -> &V {
-        if let Some(i) = self.map.get_mut(&p) {
-            // SAFETY: Referencing the index that we got from putting the value into the store.
-            // That means that there are at least that many elements in the cache. As the cache can
-            // not decrease in the number of elements in it, that index will always be a valid
-            // entry even if it does not match the parameter value that is from the map.
-            let entry = unsafe { self.cache.get_arr_ref_unchecked(*i) };
-            if *entry.0 == p {
-                // SAFETY: The safety argument above shows why the index is valid which is all that
-                // is required for this method to be safe.
-                unsafe { self.cache.make_head(*i) };
-                // SAFETY: Same reasoning as above.
-                let entry = unsafe { self.cache.get_arr_ref_unchecked(*i) };
-                entry.1
-            } else {
-                let new_val = (self.func)(p.clone());
-                self.cache.push_front((p.clone(), new_val));
-                *i = self.cache.head_index_unchecked();
-                // SAFETY: Just inserted a value into the cache so we know it's the head element
-                // and that this will be a valid value.
-                unsafe { self.cache.get_head_ref_unchecked() }
-            }
+        if let Some(i) = self.map.get_by_left(&p) {
+            // SAFETY: For the index to be in the map it must be valid and point to the correct
+            // index.
+            unsafe { self.cache.make_head(*i) };
+            unsafe { self.cache.get_arr_ref_unchecked(*i) }
         } else {
             let new_val = (self.func)(p.clone());
-            self.cache.push_front((p.clone(), new_val));
-            self.map.insert(p, self.cache.head_index_unchecked());
-            // SAFETY: Just inserted a value into the cache so we know it's the head element
-            // and that this will be a valid value.
-            unsafe { self.cache.get_head_ref_unchecked() }
+            self.cache.push_front(new_val);
+            let index = self.cache.head_index_unchecked();
+            self.map.insert(p, index);
+            // SAFETY: Just inserted something at this index so it must be valid.
+            unsafe { self.cache.get_arr_ref_unchecked(index) }
         }
     }
 
@@ -142,48 +115,14 @@ where
     /// assert_eq!(cache.get_ref_cached(1), None);
     /// ```
     pub fn get_ref_cached(&self, p: P) -> Option<&V> {
-        match self.map.get(&p) {
+        match self.map.get_by_left(&p) {
             Some(i) => {
-                // SAFETY: The index came from the map which means an element with that index was
-                // valid at some point. As the number of elements in the backing cache can never
-                // decrease, this index must point to initialized data whether or not it is the
-                // node containing the parameter that is being looked for.
-                let entry = unsafe { self.cache.get_arr_ref_unchecked(*i) };
-                if *entry.0 == p {
-                    Some(entry.1)
-                } else {
-                    None
-                }
+                // SAFETY: The index can only be in the map if it is valid and refers to the
+                // correct parameter.
+                unsafe { Some(self.cache.get_arr_ref_unchecked(*i)) }
             },
             None => None,
         }
-    }
-
-    /// Purges the backing map of unused mappings
-    ///
-    /// This method should be used to help solve the problem of the size of the backing map
-    /// potentially growing unbounded. This function will purge the backing map of any entries that
-    /// do not exist in the backing linked list.
-    ///
-    /// # Example
-    /// ```
-    /// use lru::LRUCache;
-    ///
-    /// fn double(a: usize) -> usize {
-    ///     a + a
-    /// }
-    ///
-    /// let mut lru = LRUCache::<16, usize, usize>::new(double);
-    /// for i in 0..32 {
-    ///     let _ = lru.get(i);
-    /// }
-    /// assert_eq!(lru.map_size(), 32);
-    /// lru.purge();
-    /// assert_eq!(lru.map_size(), 16);
-    /// ```
-    pub fn purge(&mut self) {
-        let values = self.cache.key_set();
-        self.map = self.map.drain_filter(|k, _v| !values.contains(k)).collect();
     }
 }
 
@@ -194,26 +133,13 @@ where
 {
     /// Same as [`LRUCache::get_ref`] but returns a copy of the value
     pub fn get(&mut self, p: P) -> V {
-        if let Some(i) = self.map.get_mut(&p) {
-            // SAFETY: The index came from the map which means an element with that index was
-            // valid at some point. As the number of elements in the backing cache can never
-            // decrease, this index must point to initialized data whether or not it is the
-            // node containing the parameter that is being looked for.
-            let entry = unsafe { self.cache.get_arr_unchecked(*i) };
-            if entry.0 == p {
-                // SAFETY: The above safety comment shows why this is a valid index. All that is
-                // required for the make_head method is that the index is valid so this is safe.
-                unsafe { self.cache.make_head(*i) };
-                entry.1
-            } else {
-                let new_val = (self.func)(p);
-                self.cache.push_front((p, new_val));
-                *i = self.cache.head_index_unchecked();
-                new_val
-            }
+        if let Some(i) = self.map.get_by_left(&p) {
+            // SAFETY: For the index to be in the map, it must be valid.
+            unsafe { self.cache.make_head(*i) };
+            unsafe { self.cache.get_arr_unchecked(*i) }
         } else {
             let new_val = (self.func)(p);
-            self.cache.push_front((p, new_val));
+            self.cache.push_front(new_val);
             self.map.insert(p, self.cache.head_index_unchecked());
             new_val
         }
@@ -221,18 +147,10 @@ where
 
     /// Same as [`LRUCache::get_ref_cached`] but returns a copy of the value
     pub fn get_cached(&self, p: P) -> Option<V> {
-        match self.map.get(&p) {
+        match self.map.get_by_left(&p) {
             Some(i) => {
-                // SAFETY: The index came from the map which means an element with that index was
-                // valid at some point. As the number of elements in the backing cache can never
-                // decrease, this index must point to initialized data whether or not it is the
-                // node containing the parameter that is being looked for.
-                let entry = unsafe { self.cache.get_arr_unchecked(*i) };
-                if entry.0 == p {
-                    Some(entry.1)
-                } else {
-                    None
-                }
+                // SAFETY: For the index to be in the map it must be valid.
+                unsafe { Some(self.cache.get_arr_unchecked(*i)) }
             },
             None => None,
         }
@@ -307,16 +225,5 @@ mod test {
         assert_eq!(lru.get(3), 2);
         assert_eq!(lru.get_ref_cached(3), Some(&2));
         assert_eq!(lru.get_ref_cached(4), None);
-    }
-
-    #[test]
-    fn purge() {
-        let mut lru = LRUCache::<16, usize, usize>::new(fib);
-        for i in 0..32 {
-            let _ = lru.get(i);
-        }
-        assert_eq!(lru.map_size(), 32);
-        lru.purge();
-        assert_eq!(lru.map_size(), 16);
     }
 }

@@ -4,8 +4,6 @@
 use std::default::Default;
 use std::iter::{IntoIterator, Iterator, ExactSizeIterator};
 use std::mem::MaybeUninit;
-use std::collections::HashSet;
-use std::hash::Hash;
 use std::fmt;
 
 /// Internal struct for holding the values in the linked list array
@@ -14,63 +12,55 @@ use std::fmt;
 /// This struct is generic over both the key and value that a LRU cache might use. The key is the
 /// parameter type that is passed to a function and the value is the return value of that function.
 #[derive(Clone, Copy)]
-struct Node<K, V> {
-    /// Index of the previous entry in the linked list
-    prev: usize,
+struct Node<V> {
     /// Index of the next entry in the linked list
     next: usize,
-    /// Key value at this node
-    key: K,
+    /// Index of the previous entry in the linked list
+    prev: usize,
     /// Value at this node
     value: V,
 }
 
-impl<K, V> Node<K, V> {
+impl<V> Node<V> {
     /// Creates a new node with the given next and previous indices and value
-    pub fn new(key: K, val: V, next: usize, prev: usize) -> Self {
+    pub fn new(val: V, next: usize, prev: usize) -> Self {
         Self {
-            prev,
             next,
-            key,
+            prev,
             value: val,
         }
     }
 }
 
-impl<K, V> Default for Node<K, V>
+impl<V> Default for Node<V>
 where
-    K: Default,
     V: Default,
 {
     fn default() -> Self {
         Self {
-            prev: 0,
             next: 0,
-            key: K::default(),
+            prev: 0,
             value: V::default(),
         }
     }
 }
 
-impl<K, V> fmt::Debug for Node<K, V>
+impl<V> fmt::Debug for Node<V>
 where
-    K: fmt::Debug,
     V: fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "Node({}, {}, {:?}, {:?})", self.prev, self.next, self.key, self.value)
+        write!(fmt, "Node({}, {}, {:?})", self.prev, self.next, self.value)
     }
 }
 
 /// A constant sized doubly linked circular list
 ///
-/// The design of this collection is for backing an LRU cache. It will keep track of the key, value
-/// pairs that a function can produce. The key needs to be kept track of in this structure because
-/// the actual LRU cache will not remove the key, index pairs from the hash map when that index is
-/// assigned a new pair.
+/// The design of this collection is for backing an LRU cache. It will keep track of the values
+/// that a function can produce.
 ///
 /// This collection is designed to have constant time operations for all operations that the LRU
-/// cache requires. Adding a new as the head and getting a specific array index are both constant
+/// cache requires. Adding a new value as the head and getting a specific array index are both constant
 /// time operations. These are the main two operations that the LRU cache will require and so this
 /// structure was optimized for those operations.
 ///
@@ -82,7 +72,7 @@ where
 ///
 /// Another important operation for the LRU cache is updating an element to be the new head of the
 /// linked list. That indicates that an element was recently accessed and should be the new most
-/// recent elemtn of the list. This can also be done in constant time if the index of the element
+/// recent element of the list. This can also be done in constant time if the index of the element
 /// that should be the new head is known. To do this operation, that index is removed from the
 /// linked list and reinserted as the head.
 ///
@@ -107,7 +97,7 @@ where
 /// that the first `self.size` elements are initialized at any point in time. This invariant is
 /// used in many of the methods of the linked list to ensure safety and quick operations on the
 /// linked list.
-pub struct ConstLinkedList<const N: usize, K, V> {
+pub struct ConstLinkedList<const N: usize, V> {
     /// Number of elements currently in the array
     size: usize,
     /// Index of the head element
@@ -115,16 +105,16 @@ pub struct ConstLinkedList<const N: usize, K, V> {
     /// Index of the tail element
     tail: usize,
     /// Backing storage of each of the nodes in the array
-    nodes: [MaybeUninit<Node<K, V>>; N],
+    nodes: [MaybeUninit<Node<V>>; N],
 }
 
-impl<const N: usize, K, V> Default for ConstLinkedList<N, K, V> {
+impl<const N: usize, V> Default for ConstLinkedList<N, V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
+impl<const N: usize, V> ConstLinkedList<N, V> {
     /// Creates a new linked list with all of the elements left uninitialized
     #[must_use]
     pub fn new() -> Self {
@@ -163,7 +153,7 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
     ///
     /// If the linked list is full, the last element will be removed and replaced with the new one.
     /// The head and tail of the list will then be updated.
-    pub fn push_front(&mut self, value: (K, V)) {
+    pub fn push_front(&mut self, value: V) {
         unsafe {
             if self.size < N {
                 // Can just place the new node at the first empty spot and then make it the head.
@@ -173,9 +163,9 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
                 // necessarily point to initialized elements as if there were initially no elements
                 // they will both be pointing to the newly inserted element. The following accesses
                 // will then only dereference initialized values making everything safe.
-                self.nodes[self.size].write(Node::new(value.0, value.1, self.head, self.tail));
-                self.nodes[self.head].assume_init_mut().prev = self.size;
+                self.nodes[self.size].write(Node::new(value, self.head, self.tail));
                 self.nodes[self.tail].assume_init_mut().next = self.size;
+                self.nodes[self.head].assume_init_mut().prev = self.size;
                 self.head = self.size;
                 self.size += 1;
             } else {
@@ -183,8 +173,7 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
                 //
                 // SAFETY: In this branch of the if else clause, we know all of the elements of the
                 // array are initialized and valid so assuming anything is initialized is correct.
-                self.nodes[self.tail].assume_init_mut().key = value.0;
-                self.nodes[self.tail].assume_init_mut().value = value.1;
+                self.nodes[self.tail].assume_init_mut().value = value;
                 self.head = self.tail;
                 self.tail = self.nodes[self.head].assume_init_ref().prev;
             }
@@ -211,7 +200,7 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
     /// Same as [`ConstLinkedList::get_linked`] but returns a reference to the key value pair
     ///
     /// Returns `None` if the index is invalid.
-    pub fn get_linked_ref(&self, index: usize) -> Option<(&K, &V)> {
+    pub fn get_linked_ref(&self, index: usize) -> Option<&V> {
         if index >= self.size {
             return None;
         }
@@ -225,7 +214,7 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
                 curr_node = self.nodes[curr_node.next].assume_init_ref();
                 curr_index += 1;
             }
-            Some((&curr_node.key, &curr_node.value))
+            Some(&curr_node.value)
         }
     }
 
@@ -233,14 +222,14 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
     ///
     /// This method will check to ensure that the index is valid and will return None if there is
     /// not a valid element at that address.
-    pub fn get_arr_ref(&self, index: usize) -> Option<(&K, &V)> {
+    pub fn get_arr_ref(&self, index: usize) -> Option<&V> {
         if index >= self.size {
             None
         } else {
             // SAFETY: There is at least one element in the list so the head will point to a valid
             // initialized node.
             let node = unsafe { self.nodes[index].assume_init_ref() };
-            Some((&node.key, &node.value))
+            Some(&node.value)
         }
     }
 
@@ -249,9 +238,9 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
     ///
     /// # Safety
     /// Caller must assure that the index references a valid entry in the backing list.
-    pub unsafe fn get_arr_ref_unchecked(&self, index: usize) -> (&K, &V) {
+    pub unsafe fn get_arr_ref_unchecked(&self, index: usize) -> &V {
         let node = self.nodes[index].assume_init_ref();
-        (&node.key, &node.value)
+        &node.value
     }
 
     /// Get a reference to the head element of the list
@@ -263,15 +252,14 @@ impl<const N: usize, K, V> ConstLinkedList<N, K, V> {
     }
 }
 
-impl<const N: usize, K, V> ConstLinkedList<N, K, V>
+impl<const N: usize, V> ConstLinkedList<N, V>
 where
-    K: Copy,
     V: Copy,
 {
     /// Get the `index`th element indexing by linked list entry
     ///
     /// Returns `None` if the index is greater than the size.
-    pub fn get_linked(&self, index: usize) -> Option<(K, V)> {
+    pub fn get_linked(&self, index: usize) -> Option<V> {
         if index >= self.size {
             return None;
         }
@@ -285,21 +273,21 @@ where
                 curr_node = self.nodes[curr_node.next].assume_init_ref();
                 curr_index += 1;
             }
-            Some((curr_node.key, curr_node.value))
+            Some(curr_node.value)
         }
     }
 
     /// Get the `index`th element indexing directly into the backing array
     ///
     /// Returns `None` if the index is greater than the size.
-    pub fn get_arr(&self, index: usize) -> Option<(K, V)> {
+    pub fn get_arr(&self, index: usize) -> Option<V> {
         if index >= self.size {
             None
         } else {
             // SAFETY: There is at least one element in the list so the head will point to a valid
             // initialized node.
             let node = unsafe { self.nodes[index].assume_init_ref() };
-            Some((node.key, node.value))
+            Some(node.value)
         }
     }
 
@@ -308,43 +296,27 @@ where
     /// # Safety
     /// Caller needs to ensure that the index references an initialized value in the
     /// backing array.
-    pub unsafe fn get_arr_unchecked(&self, index: usize) -> (K, V) {
+    pub unsafe fn get_arr_unchecked(&self, index: usize) -> V {
         let node = self.nodes[index].assume_init_ref();
-        (node.key, node.value)
+        node.value
     }
 
     /// Gets the head element of the list
     ///
     /// Returns `None` if there are no elements in the list.
-    pub fn get_head(&self) -> Option<(K, V)> {
+    pub fn get_head(&self) -> Option<V> {
         if self.size > 0 {
             // SAFETY: There is at least one element in the list so head must point to a valid
             // initialized node.
             let node = unsafe { self.nodes[self.head].assume_init_ref() };
-            Some((node.key, node.value))
+            Some(node.value)
         } else {
             None
         }
     }
 }
 
-impl<const N: usize, K, V> ConstLinkedList<N, K, V>
-where
-    K: Clone + Eq + Hash,
-{
-    /// Get a set of the the keys in the linked list
-    pub fn key_set(&self) -> HashSet<K> {
-        let mut keys = HashSet::with_capacity(self.size);
-        for i in 0..self.size {
-            // SAFETY: The fist `self.size` elements are the ones that have been initialized. It is
-            // therefore safe to assume they are initialized and access them.
-            unsafe { keys.insert(self.nodes[i].assume_init_ref().key.clone()) };
-        }
-        keys
-    }
-}
-
-impl<const N: usize, K, V> Drop for ConstLinkedList<N, K, V> {
+impl<const N: usize, V> Drop for ConstLinkedList<N, V> {
     // The backing storage of the nodes is always [`MaybeUninit`] which means they won't
     // automatically get dropped when the collection is dropped. We need to go through all of the
     // initialized elements and manually drop them.
@@ -358,13 +330,12 @@ impl<const N: usize, K, V> Drop for ConstLinkedList<N, K, V> {
 }
 
 // This trait implementation is not really necessary. Having it just makes some testing easier
-impl<const N: usize, K, V> IntoIterator for ConstLinkedList<N, K, V>
+impl<const N: usize, V> IntoIterator for ConstLinkedList<N, V>
 where
-    K: Clone + Copy,
     V: Clone + Copy,
 {
     type Item = V;
-    type IntoIter = ListIterator<N, K, V>;
+    type IntoIter = ListIterator<N, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter {
@@ -376,20 +347,18 @@ where
     }
 }
 
-pub struct ListIterator<const N: usize, K, V>
+pub struct ListIterator<const N: usize, V>
 where
-    K: Clone + Copy,
     V: Clone + Copy,
 {
     curr_index: usize,
     total_vals: usize,
     iter_index: usize,
-    nodes: [MaybeUninit<Node<K, V>>; N],
+    nodes: [MaybeUninit<Node<V>>; N],
 }
 
-impl<const N: usize, K, V> Iterator for ListIterator<N, K, V>
+impl<const N: usize, V> Iterator for ListIterator<N, V>
 where
-    K: Clone + Copy,
     V: Clone + Copy,
 {
     type Item = V;
@@ -408,9 +377,8 @@ where
     }
 }
 
-impl<const N: usize, K, V> ExactSizeIterator for ListIterator<N, K, V>
+impl<const N: usize, V> ExactSizeIterator for ListIterator<N, V>
 where
-    K: Clone + Copy,
     V: Clone + Copy,
 {
     fn len(&self) -> usize {
@@ -424,27 +392,27 @@ mod test {
 
     #[test]
     fn push_one() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((10, 10));
-        assert_eq!(cache.get_linked(0), Some((10, 10)));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(10);
+        assert_eq!(cache.get_linked(0), Some(10));
     }
 
     #[test]
     fn push_size() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
+        let mut cache = ConstLinkedList::<16, usize>::new();
         for i in 0..16 {
-            cache.push_front((i, i));
+            cache.push_front(i);
         }
         for i in 0..16 {
-            assert_eq!(cache.get_linked(i), Some((15-i, 15-i)));
+            assert_eq!(cache.get_linked(i), Some(15-i));
         }
     }
 
     #[test]
     fn basic_iter() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
+        let mut cache = ConstLinkedList::<16, usize>::new();
         for i in 0..16 {
-            cache.push_front((i, i));
+            cache.push_front(i);
         }
         for (i, n) in cache.into_iter().enumerate() {
             assert_eq!(n, (15-i));
@@ -453,18 +421,18 @@ mod test {
 
     #[test]
     fn head_index() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
+        let mut cache = ConstLinkedList::<16, usize>::new();
         for i in 0..16 {
-            cache.push_front((i, i));
+            cache.push_front(i);
         }
         assert_eq!(cache.head_index(), Some(15));
     }
 
     #[test]
     fn ejection() {
-        let mut cache = ConstLinkedList::<10, usize, usize>::new();
+        let mut cache = ConstLinkedList::<10, usize>::new();
         for i in 0..100 {
-            cache.push_front((i, i));
+            cache.push_front(i);
         }
         for v in cache {
             assert!((90..100).contains(&v));
@@ -473,20 +441,20 @@ mod test {
 
     #[test]
     fn make_head() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
+        let mut cache = ConstLinkedList::<16, usize>::new();
         for i in 0..16 {
-            cache.push_front((i, i));
+            cache.push_front(i);
         }
-        assert_eq!(cache.get_head(), Some((15, 15)));
+        assert_eq!(cache.get_head(), Some(15));
         unsafe { cache.make_head(0); }
-        assert_eq!(cache.get_head(), Some((0, 0)));
+        assert_eq!(cache.get_head(), Some(0));
     }
 
     #[test]
     fn empty_iterator() {
         // I found some ub with iterating over a linked list when it has zero elements in it. This
         // test should check to make sure that doesn't happen again.
-        let cache = ConstLinkedList::<16, usize, usize>::new();
+        let cache = ConstLinkedList::<16, usize>::new();
         for _n in cache {
             assert!(false);
         }
@@ -495,8 +463,8 @@ mod test {
 
     #[test]
     fn single_iterator() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((1, 1));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(1);
         let mut iter = cache.into_iter();
         assert_eq!(iter.len(), 1);
         assert_eq!(iter.next(), Some(1));
@@ -505,33 +473,33 @@ mod test {
 
     #[test]
     fn linked_index() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((1, 1));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(1);
         let val = cache.get_linked(0);
-        assert_eq!(val, Some((1, 1)));
+        assert_eq!(val, Some(1));
     }
 
     #[test]
     fn linked_ref_index() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((1, 1));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(1);
         let val = cache.get_linked_ref(0);
-        assert_eq!(val, Some((&1, &1)));
+        assert_eq!(val, Some(&1));
     }
 
     #[test]
     fn arr_index() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((1, 1));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(1);
         let val = cache.get_arr(0);
-        assert_eq!(val, Some((1, 1)));
+        assert_eq!(val, Some(1));
     }
 
     #[test]
     fn arr_ref_index() {
-        let mut cache = ConstLinkedList::<16, usize, usize>::new();
-        cache.push_front((1, 1));
+        let mut cache = ConstLinkedList::<16, usize>::new();
+        cache.push_front(1);
         let val = cache.get_arr_ref(0);
-        assert_eq!(val, Some((&1, &1)));
+        assert_eq!(val, Some(&1));
     }
 }
